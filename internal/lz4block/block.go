@@ -327,6 +327,124 @@ type hcTables[T hcPosition] struct {
 	chainTable [winSize]T
 }
 
+// findRunMatch returns the same match as the chain walk in compressBlockHC,
+// for when src[si:] starts with a run of k >= minRunHC bytes equal to b, with
+// k capped at maxLen. On such data the chain holds every position of every
+// earlier run of b, and comparing each of them dominates the search.
+//
+// Let p < si be a position that starts a run of r bytes equal to b. Its match
+// with si is exactly min(r, k) bytes long unless r == k:
+//   - if r < k, then src[p+r] != b but src[si+r] == b, so the match is r
+//     bytes long (r < k <= maxLen, so matchLength reports it exactly);
+//   - if r > k, then src[p+k] == b but src[si+k] != b, or k == maxLen and
+//     matchLength reports no more than maxLen, so the match is k bytes long;
+//   - if r == k, the match is at least k bytes long, and may be longer.
+//
+// The plain walk replaces the current match only with a strictly longer one,
+// so of the positions it visits it keeps the first of the longest, and it
+// stops early once the match reaches maxLen. Its one-byte filter only skips
+// positions that cannot be kept, so it does not change the result.
+//
+// When the chain goes from a position cand in a run of b to cand-1, and
+// src[cand-1] == b, then cand-1 is in the same run, with a run one byte
+// longer. The loop below follows such steps without comparing anything,
+// spending one try per position exactly as the plain walk does. If cand has
+// a run of rc bytes, the positions cand, cand-1, ..., last have runs of rc,
+// rc+1, ..., rc+cand-last bytes, and the case analysis picks the position
+// and length the plain walk would have kept among them.
+func (t *hcTables[T]) findRunMatch(src []byte, si, sn, maxLen int, depth CompressionLevel, h uint32, b byte, k int) (mLen, offset int) {
+	for next, try := int(t.hashTable[h]), depth; try > 0 && next > 0 && si-next < winSize; try-- {
+		cand := next
+		next = int(t.chainTable[next&winMask])
+		var ml int
+		if next == cand-1 && src[cand] == b && src[next] == b {
+			// rc is the run at cand, counted up to k+1 bytes, which is enough
+			// to tell r < k, r == k and r > k apart. A run that reaches si
+			// continues with the run at si, so it is longer than k.
+			rc := k + 1
+			if d := si - cand; d > k {
+				rc = runLength(src, cand, b, k+1)
+			} else if r := runLength(src, cand, b, d); r < d {
+				rc = r
+			}
+			last := cand
+			for try > 1 && next > 0 && si-next < winSize && next == last-1 && src[next] == b {
+				last = next
+				next = int(t.chainTable[next&winMask])
+				try--
+			}
+			switch {
+			case rc > k:
+				// Every position has r > k and matches exactly k bytes, so
+				// the plain walk keeps the first one, cand.
+				ml = k
+			case k-rc <= cand-last:
+				// The walk reached the position with r == k. The positions
+				// before it match rc to k-1 bytes and those after it match
+				// k, while it matches at least k, so the plain walk keeps
+				// it. Positions after it cannot change the result, as they
+				// are not longer; and if it reaches maxLen, the plain walk
+				// stops there, as this one does below.
+				cand -= k - rc
+				ml = matchLength(src, cand, si, sn)
+			default:
+				// Every position has r < k, so they match rc, rc+1, ...,
+				// rc+cand-last bytes and the plain walk keeps the last one.
+				ml = rc + cand - last
+				cand = last
+			}
+		} else {
+			if src[cand+mLen] != src[si+mLen] {
+				continue
+			}
+			ml = matchLength(src, cand, si, sn)
+		}
+		if ml < minMatch || ml <= mLen {
+			continue
+		}
+		mLen = ml
+		offset = si - cand
+		if mLen >= maxLen {
+			break
+		}
+	}
+	return
+}
+
+// minRunHC is the shortest run length for which runs are handled in bulk.
+const minRunHC = 16
+
+// matchLength returns the length of the match between src[cand:] and
+// src[si:], comparing 8 bytes at a time while fewer than sn-si bytes match.
+func matchLength(src []byte, cand, si, sn int) int {
+	ml := 0
+	for ml < sn-si {
+		x := binary.LittleEndian.Uint64(src[cand+ml:]) ^ binary.LittleEndian.Uint64(src[si+ml:])
+		if x != 0 {
+			// Stop is first non-zero byte.
+			return ml + bits.TrailingZeros64(x)>>3
+		}
+		ml += 8
+	}
+	return ml
+}
+
+// runLength returns the number of consecutive bytes equal to b at src[i:],
+// up to max. It reads src[i : i+max+7].
+func runLength(src []byte, i int, b byte, max int) int {
+	pattern := uint64(b) * 0x0101010101010101
+	for n := 0; n < max; n += 8 {
+		if x := binary.LittleEndian.Uint64(src[i+n:]) ^ pattern; x != 0 {
+			n += bits.TrailingZeros64(x) >> 3
+			if n > max {
+				return max
+			}
+			return n
+		}
+	}
+	return max
+}
+
 var compressorHCPool = sync.Pool{New: func() interface{} { return new(CompressorHC) }}
 
 func CompressBlockHC(src, dst []byte, depth CompressionLevel) (int, error) {
@@ -389,8 +507,15 @@ func compressBlockHC[T hcPosition](t *hcTables[T], src, dst []byte, depth Compre
 		maxLen := (sn - si + 7) &^ 7
 
 		// Follow the chain until out of window and give the longest match.
-		mLen := 0
-		offset := 0
+		// k is the length of the run of one byte at si, if measured.
+		var mLen, offset, k int
+		if b := byte(match); match == uint32(b)*0x01010101 && t.hashTable[h] > 0 && si-int(t.hashTable[h]) < winSize {
+			// There is at least one candidate: measure the run.
+			if k = runLength(src, si, b, maxLen); k >= minRunHC {
+				mLen, offset = t.findRunMatch(src, si, sn, maxLen, depth, h, b, k)
+				goto found
+			}
+		}
 		for next, try := int(t.hashTable[h]), depth; try > 0 && next > 0 && si-next < winSize; try-- {
 			// Load the following position first: it does not depend on the
 			// comparison, and the walk is bound by these dependent loads.
@@ -401,18 +526,8 @@ func compressBlockHC[T hcPosition](t *hcTables[T], src, dst []byte, depth Compre
 			if src[cand+mLen] != src[si+mLen] {
 				continue
 			}
-			ml := 0
 			// Compare the current position with a previous with the same hash.
-			for ml < sn-si {
-				x := binary.LittleEndian.Uint64(src[cand+ml:]) ^ binary.LittleEndian.Uint64(src[si+ml:])
-				if x == 0 {
-					ml += 8
-				} else {
-					// Stop is first non-zero byte.
-					ml += bits.TrailingZeros64(x) >> 3
-					break
-				}
-			}
+			ml := matchLength(src, cand, si, sn)
 			if ml < minMatch || ml <= mLen {
 				// Match too small (<minMath) or smaller than the current match.
 				continue
@@ -426,6 +541,7 @@ func compressBlockHC[T hcPosition](t *hcTables[T], src, dst []byte, depth Compre
 			}
 			// Try another previous position with the same hash.
 		}
+	found:
 		t.chainTable[si&winMask] = t.hashTable[h]
 		t.hashTable[h] = T(si)
 
@@ -441,6 +557,22 @@ func compressBlockHC[T hcPosition](t *hcTables[T], src, dst []byte, depth Compre
 		winStart := si + 1
 		if ws := si + mLen - winSize; ws > winStart {
 			winStart = ws
+		}
+		if k > minMatch && winStart == si+1 {
+			// The positions si+1 to si+k-4 start with the same 4 bytes as si,
+			// so inserting them one at a time, as the loop below does, would
+			// chain each to its predecessor and leave the last one in the
+			// hash table. The loop rolls its 4-byte hash input forward from
+			// si, so this is only done when it starts at si+1.
+			n := k - minMatch
+			if n > mLen-1 {
+				n = mLen - 1
+			}
+			for j := si + 1; j <= si+n; j++ {
+				t.chainTable[j&winMask] = T(j - 1)
+			}
+			t.hashTable[h] = T(si + n)
+			winStart += n
 		}
 		for si, ml := winStart, si+mLen; si < ml; {
 			match >>= 8
