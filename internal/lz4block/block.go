@@ -2,6 +2,7 @@ package lz4block
 
 import (
 	"encoding/binary"
+	"math"
 	"math/bits"
 	"sync"
 
@@ -300,11 +301,30 @@ func blockHashHC(x uint32) uint32 {
 	return x * hasher >> (32 - winSizeLog)
 }
 
+// CompressorHC holds the match finder state for the high compression mode.
+//
+// Positions are stored in the narrowest type that can hold them: 16 bits for
+// inputs of up to winSize bytes, 32 bits otherwise. Keeping the tables small
+// matters because following the hash chain is dominated by cache misses.
 type CompressorHC struct {
-	// hashTable: stores the last position found for a given hash
-	// chainTable: stores previous positions for a given hash
-	hashTable, chainTable [htSize]int
-	needsReset            bool
+	small hcTables[uint16]
+	large *hcTables[int32] // Allocated on first use.
+	// Whether the tables have been used and need to be reset before reuse.
+	smallDirty, largeDirty bool
+}
+
+type hcPosition interface {
+	uint16 | int32
+}
+
+type hcTables[T hcPosition] struct {
+	// hashTable: stores the last position found for a given hash, or 0.
+	hashTable [htSize]T
+	// chainTable: stores, for each position in the window, the previous
+	// position with the same hash. An entry is always written when its
+	// position is inserted, before it can be read, so it never needs to be
+	// reset.
+	chainTable [winSize]T
 }
 
 var compressorHCPool = sync.Pool{New: func() interface{} { return new(CompressorHC) }}
@@ -316,14 +336,29 @@ func CompressBlockHC(src, dst []byte, depth CompressionLevel) (int, error) {
 	return n, err
 }
 
-func (c *CompressorHC) CompressBlock(src, dst []byte, depth CompressionLevel) (_ int, err error) {
-	if c.needsReset {
-		// Zero out reused table to avoid non-deterministic output (issue #65).
-		c.hashTable = [htSize]int{}
-		c.chainTable = [htSize]int{}
+func (c *CompressorHC) CompressBlock(src, dst []byte, depth CompressionLevel) (int, error) {
+	// Zero out reused tables to avoid non-deterministic output (issue #65).
+	if len(src) <= winSize {
+		if c.smallDirty {
+			c.small.hashTable = [htSize]uint16{}
+		}
+		c.smallDirty = true
+		return compressBlockHC(&c.small, src, dst, depth)
 	}
-	c.needsReset = true // Only false on first call.
+	if int64(len(src)) > math.MaxInt32 {
+		// Positions are stored as int32.
+		return 0, lz4errors.ErrInvalidSourceShortBuffer
+	}
+	if c.large == nil {
+		c.large = new(hcTables[int32])
+	} else if c.largeDirty {
+		c.large.hashTable = [htSize]int32{}
+	}
+	c.largeDirty = true
+	return compressBlockHC(c.large, src, dst, depth)
+}
 
+func compressBlockHC[T hcPosition](t *hcTables[T], src, dst []byte, depth CompressionLevel) (_ int, err error) {
 	defer recoverBlock(&err)
 
 	// Return 0, nil only if the destination buffer size is < CompressBlockBound.
@@ -349,19 +384,27 @@ func (c *CompressorHC) CompressBlock(src, dst []byte, depth CompressionLevel) (_
 		match := binary.LittleEndian.Uint32(src[si:])
 		h := blockHashHC(match)
 
+		// The comparison loop below advances 8 bytes at a time while ml < sn-si,
+		// so no match can be longer than sn-si rounded up to a multiple of 8.
+		maxLen := (sn - si + 7) &^ 7
+
 		// Follow the chain until out of window and give the longest match.
 		mLen := 0
 		offset := 0
-		for next, try := c.hashTable[h], depth; try > 0 && next > 0 && si-next < winSize; next, try = c.chainTable[next&winMask], try-1 {
+		for next, try := int(t.hashTable[h]), depth; try > 0 && next > 0 && si-next < winSize; try-- {
+			// Load the following position first: it does not depend on the
+			// comparison, and the walk is bound by these dependent loads.
+			cand := next
+			next = int(t.chainTable[next&winMask])
 			// The first (mLen==0) or next byte (mLen>=minMatch) at current match length
 			// must match to improve on the match length.
-			if src[next+mLen] != src[si+mLen] {
+			if src[cand+mLen] != src[si+mLen] {
 				continue
 			}
 			ml := 0
 			// Compare the current position with a previous with the same hash.
 			for ml < sn-si {
-				x := binary.LittleEndian.Uint64(src[next+ml:]) ^ binary.LittleEndian.Uint64(src[si+ml:])
+				x := binary.LittleEndian.Uint64(src[cand+ml:]) ^ binary.LittleEndian.Uint64(src[si+ml:])
 				if x == 0 {
 					ml += 8
 				} else {
@@ -376,11 +419,15 @@ func (c *CompressorHC) CompressBlock(src, dst []byte, depth CompressionLevel) (_
 			}
 			// Found a longer match, keep its position and length.
 			mLen = ml
-			offset = si - next
+			offset = si - cand
+			if mLen >= maxLen {
+				// No other candidate can be longer.
+				break
+			}
 			// Try another previous position with the same hash.
 		}
-		c.chainTable[si&winMask] = c.hashTable[h]
-		c.hashTable[h] = si
+		t.chainTable[si&winMask] = t.hashTable[h]
+		t.hashTable[h] = T(si)
 
 		// No match found.
 		if mLen == 0 {
@@ -399,8 +446,8 @@ func (c *CompressorHC) CompressBlock(src, dst []byte, depth CompressionLevel) (_
 			match >>= 8
 			match |= uint32(src[si+3]) << 24
 			h := blockHashHC(match)
-			c.chainTable[si&winMask] = c.hashTable[h]
-			c.hashTable[h] = si
+			t.chainTable[si&winMask] = t.hashTable[h]
+			t.hashTable[h] = T(si)
 			si++
 		}
 
