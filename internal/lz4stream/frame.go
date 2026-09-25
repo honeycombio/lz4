@@ -30,7 +30,7 @@ type Frame struct {
 	Blocks     Blocks
 	Checksum   uint32
 	checksum   xxh32.XXHZero
-	size       uint64 // uncompressed bytes read so far, checked against Descriptor.ContentSize
+	size       uint64 // uncompressed bytes read or written so far, checked against Descriptor.ContentSize
 }
 
 // unexpectedEOF is for reads that must not hit the end of the source,
@@ -61,6 +61,7 @@ func (f *Frame) InitW(dst io.Writer, num int, legacy bool) {
 	}
 	f.Blocks.initW(f, dst, num)
 	f.checksum.Reset()
+	f.size = 0
 }
 
 func (f *Frame) CloseW(dst io.Writer, num int) error {
@@ -69,6 +70,10 @@ func (f *Frame) CloseW(dst io.Writer, num int) error {
 	}
 	if f.isLegacy() {
 		return nil
+	}
+	if f.Descriptor.Flags.Size() && f.size != f.Descriptor.ContentSize {
+		// Leave the frame without its end mark: it is invalid anyway.
+		return fmt.Errorf("%w: wrote %d; expected %d", lz4errors.ErrInvalidContentSize, f.size, f.Descriptor.ContentSize)
 	}
 	buf := f.buf[:0]
 	// End mark (data block size of uint32(0)).

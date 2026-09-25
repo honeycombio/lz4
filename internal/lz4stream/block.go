@@ -309,6 +309,7 @@ func (b *FrameDataBlock) Write(f *Frame, dst io.Writer) error {
 	if f.Descriptor.Flags.ContentChecksum() {
 		_, _ = f.checksum.Write(b.src)
 	}
+	f.size += uint64(len(b.src))
 	buf := f.buf[:]
 	binary.LittleEndian.PutUint32(buf, uint32(b.Size))
 	if _, err := dst.Write(buf[:4]); err != nil {

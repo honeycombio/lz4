@@ -160,6 +160,7 @@ const (
 	// unknown version, reserved bits set, or a dictionary ID.
 	ErrInvalidFrameDescriptor = lz4errors.ErrInvalidFrameDescriptor
 	// ErrInvalidContentSize is returned when reading a frame whose uncompressed size differs
-	// from the content size in its descriptor.
+	// from the content size in its descriptor, or when writing a frame whose data differs
+	// from SizeOption.
 	ErrInvalidContentSize = lz4errors.ErrInvalidContentSize
 )

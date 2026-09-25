@@ -632,3 +632,75 @@ func TestWriterEmpty(t *testing.T) {
 		}
 	}
 }
+
+// A frame whose data differs from SizeOption cannot be read back, so writing
+// one must fail too.
+func TestWriterSizeOption(t *testing.T) {
+	data := testData(100000, true, 9)
+	withWriter := func(opts ...lz4.Option) func([]byte, uint64, bool) ([]byte, error) {
+		return func(data []byte, size uint64, readFrom bool) ([]byte, error) {
+			var buf bytes.Buffer
+			zw := lz4.NewWriter(&buf)
+			if err := zw.Apply(append(opts, lz4.SizeOption(size), lz4.BlockSizeOption(lz4.Block64Kb))...); err != nil {
+				return nil, err
+			}
+			var err error
+			if readFrom {
+				_, err = zw.ReadFrom(bytes.NewReader(data))
+			} else {
+				_, err = zw.Write(data)
+			}
+			if err != nil {
+				return nil, err
+			}
+			err = zw.Close()
+			return buf.Bytes(), err
+		}
+	}
+	writers := []struct {
+		name     string
+		write    func([]byte, uint64, bool) ([]byte, error)
+		readFrom bool
+	}{
+		{"Write", withWriter(), false},
+		{"Write/conc", withWriter(lz4.ConcurrencyOption(4)), false},
+		{"ReadFrom", withWriter(), true},
+		{"ReadFrom/conc", withWriter(lz4.ConcurrencyOption(4)), true},
+		{"CompressingReader", func(data []byte, size uint64, _ bool) ([]byte, error) {
+			zc := lz4.NewCompressingReader(io.NopCloser(bytes.NewReader(data)))
+			if err := zc.Apply(lz4.SizeOption(size), lz4.BlockSizeOption(lz4.Block64Kb)); err != nil {
+				return nil, err
+			}
+			return io.ReadAll(zc)
+		}, false},
+	}
+	for _, w := range writers {
+		for _, tc := range []struct {
+			name    string
+			n       int
+			size    uint64
+			wantErr error
+		}{
+			{"exact", len(data), uint64(len(data)), nil},
+			{"exactOneByte", 1, 1, nil},
+			{"short", len(data) - 1, uint64(len(data)), lz4.ErrInvalidContentSize},
+			{"long", len(data), uint64(len(data)) - 1, lz4.ErrInvalidContentSize},
+			{"empty", 0, 1, lz4.ErrInvalidContentSize},
+			{"zeroMeansUnset", len(data), 0, nil},
+		} {
+			t.Run(w.name+"/"+tc.name, func(t *testing.T) {
+				frame, err := w.write(data[:tc.n], tc.size, w.readFrom)
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("got error %v, want %v", err, tc.wantErr)
+				}
+				if err != nil {
+					return
+				}
+				out, err := decodeAllModes(t, frame)
+				if err != nil || !bytes.Equal(out, data[:tc.n]) {
+					t.Fatalf("read back %d bytes, err %v", len(out), err)
+				}
+			})
+		}
+	}
+}
