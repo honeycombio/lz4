@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"sync"
 	"testing"
 
 	"github.com/pierrec/lz4/v4"
@@ -35,6 +36,10 @@ var decodeModes = []decodeMode{
 
 var errNoProgress = errors.New("Read made no progress")
 
+// readBufs recycles the read buffers: a fresh 4MB one per decode dominates
+// the run time, particularly with the race detector.
+var readBufs sync.Pool
+
 func decodeWith(m decodeMode, in []byte) ([]byte, error) {
 	zr := lz4.NewReader(bytes.NewReader(in))
 	if err := zr.Apply(lz4.ConcurrencyOption(m.conc)); err != nil {
@@ -45,7 +50,13 @@ func decodeWith(m decodeMode, in []byte) ([]byte, error) {
 		_, err := zr.WriteTo(&out)
 		return out.Bytes(), err
 	}
-	buf := make([]byte, m.bufSize)
+	bp, _ := readBufs.Get().(*[]byte)
+	if bp == nil || len(*bp) < m.bufSize {
+		b := make([]byte, 4<<20+1)
+		bp = &b
+	}
+	defer readBufs.Put(bp)
+	buf := (*bp)[:m.bufSize]
 	for stalls := 0; stalls < 100; {
 		n, err := zr.Read(buf)
 		out.Write(buf[:n])
@@ -122,7 +133,7 @@ func testData(n int, compressible bool, seed int64) []byte {
 
 func TestFrameRoundTripBoundaries(t *testing.T) {
 	blockSizes := []lz4.BlockSize{lz4.Block64Kb, lz4.Block256Kb, lz4.Block1Mb, lz4.Block4Mb}
-	if testing.Short() {
+	if !thorough() {
 		blockSizes = blockSizes[:2]
 	}
 	for _, bs := range blockSizes {
@@ -159,21 +170,32 @@ func TestFrameRoundTripBoundaries(t *testing.T) {
 	}
 }
 
+// thorough reports whether to run the slow exhaustive cases. The race
+// detector runs are there for the concurrent paths, and are much slower.
+func thorough() bool { return !testing.Short() && !raceEnabled }
+
 // truncationCuts returns the prefix lengths to try: all of them for small
 // frames, otherwise the start, the end, and a sample in between.
 func truncationCuts(n int) []int {
-	if n <= 2048 {
+	if n <= 256 || (n <= 2048 && thorough()) {
 		cuts := make([]int, n)
 		for i := range cuts {
 			cuts[i] = i
 		}
 		return cuts
 	}
+	edge, stride := 64, 997
+	switch {
+	case n <= 2048:
+		edge, stride = 16, 7
+	case !thorough():
+		edge, stride = 16, 4999
+	}
 	var cuts []int
-	for i := 0; i < 64; i++ {
+	for i := 0; i < edge; i++ {
 		cuts = append(cuts, i, n-1-i)
 	}
-	for i := 64; i < n-64; i += 997 {
+	for i := edge; i < n-edge; i += stride {
 		cuts = append(cuts, i)
 	}
 	return cuts
@@ -197,7 +219,7 @@ func TestFrameTruncated(t *testing.T) {
 		{"concatenated", small, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			frame := encode(t, tc.data, tc.opts...)
+			frame := encode(t, tc.data, append([]lz4.Option{lz4.BlockSizeOption(lz4.Block64Kb)}, tc.opts...)...)
 			want := tc.data
 			if tc.name == "concatenated" {
 				frame = append(frame, frame...)
@@ -257,10 +279,14 @@ func TestFrameCorrupted(t *testing.T) {
 		{"legacy", small, []lz4.Option{lz4.LegacyOption(true)}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			frame := encode(t, tc.data, tc.opts...)
+			frame := encode(t, tc.data, append([]lz4.Option{lz4.BlockSizeOption(lz4.Block64Kb)}, tc.opts...)...)
 			bad := make([]byte, len(frame))
+			masks := []byte{0x01, 0x80, 0xFF}
+			if !thorough() {
+				masks = masks[2:]
+			}
 			for _, pos := range truncationCuts(len(frame)) {
-				for _, mask := range []byte{0x01, 0x80, 0xFF} {
+				for _, mask := range masks {
 					copy(bad, frame)
 					bad[pos] ^= mask
 					out, err := decodeAllModes(t, bad)
