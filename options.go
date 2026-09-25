@@ -59,7 +59,7 @@ func BlockSizeOption(size BlockSize) Option {
 			return nil
 		case *CompressingReader:
 			size := uint32(size)
-			if !lz4block.IsValid(size) {
+			if !lz4block.Index(size).IsValid() { // never legacy, so no Block8Mb
 				return fmt.Errorf("%w: %d", lz4errors.ErrOptionInvalidBlockSize, size)
 			}
 			w.frame.Descriptor.Flags.BlockSizeIndexSet(lz4block.Index(size))
