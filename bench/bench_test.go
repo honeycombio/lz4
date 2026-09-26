@@ -49,13 +49,14 @@ func BenchmarkCompressBlock(b *testing.B) {
 						total += c.compress(blk, dst)
 					}
 					b.SetBytes(int64(len(in.Data)))
-					b.ReportMetric(100*float64(total)/float64(len(in.Data)), "%size")
 					b.ResetTimer()
 					for i := 0; i < b.N; i++ {
 						for _, blk := range blocks {
 							c.compress(blk, dst)
 						}
 					}
+					// After the loop: ResetTimer deletes reported metrics.
+					b.ReportMetric(100*float64(total)/float64(len(in.Data)), "%size")
 				})
 			}
 		}
