@@ -1,6 +1,6 @@
 # Output of lz4 1.10.0's LZ4_compress_fast, per case: total compressed size
 # and SHA-256 of each block's size (uint32 LE, 0 if it did not fit) and data.
-# See TestCompressorFasterGolden in internal/lz4block.
+# See TestCompressorCCompatGolden in internal/lz4block.
 zeros/4096/bound/1 6656 1b054be91a97b8fd435a0c0c3ba2fd81bc374a8a8d8f9a744a60e5f381c58ae3
 zeros/4096/bound/3 6656 1b054be91a97b8fd435a0c0c3ba2fd81bc374a8a8d8f9a744a60e5f381c58ae3
 zeros/4096/src/1 6656 1b054be91a97b8fd435a0c0c3ba2fd81bc374a8a8d8f9a744a60e5f381c58ae3

@@ -6,61 +6,61 @@ import (
 	"sync"
 )
 
-// CompressorFaster is a port of LZ4_compress_fast from the reference
+// CompressorCCompat is a port of LZ4_compress_fast from the reference
 // implementation (lz4 1.10), and produces the same output. It searches one
 // position per step with a 16kiB table, where Compressor searches three per
-// step with a 128kiB one: it is faster, but compresses less.
+// step with a 128kiB one and skips ahead faster when matches stop.
 //
 // Constants and names follow lz4.c.
 const (
-	fasterHashLog   = 12          // LZ4_HASHLOG, for the default LZ4_MEMORY_USAGE of 14
-	fasterMFLimit   = 12          // MFLIMIT
-	fasterMinLength = 13          // LZ4_minLength
-	lastLiterals    = 5           // LASTLITERALS
-	skipTrigger     = 6           // LZ4_skipTrigger
-	fasterU16Limit  = 64<<10 + 11 // LZ4_64Klimit: smaller inputs use the byU16 table
-	fasterMaxInput  = 0x7E000000  // LZ4_MAX_INPUT_SIZE
-	distanceMax     = 65535       // LZ4_DISTANCE_MAX
-	accelerationMax = 65537       // LZ4_ACCELERATION_MAX
+	ccompatHashLog   = 12          // LZ4_HASHLOG, for the default LZ4_MEMORY_USAGE of 14
+	ccompatMFLimit   = 12          // MFLIMIT
+	ccompatMinLength = 13          // LZ4_minLength
+	lastLiterals     = 5           // LASTLITERALS
+	skipTrigger      = 6           // LZ4_skipTrigger
+	ccompatU16Limit  = 64<<10 + 11 // LZ4_64Klimit: smaller inputs use the byU16 table
+	ccompatMaxInput  = 0x7E000000  // LZ4_MAX_INPUT_SIZE
+	distanceMax      = 65535       // LZ4_DISTANCE_MAX
+	accelerationMax  = 65537       // LZ4_ACCELERATION_MAX
 
-	fasterTableSize = 1 << (fasterHashLog + 1)
+	ccompatTableSize = 1 << (ccompatHashLog + 1)
 )
 
-type CompressorFaster struct {
-	// Inputs below fasterU16Limit use all of table16 (byU16 in lz4.c), larger
+type CompressorCCompat struct {
+	// Inputs below ccompatU16Limit use all of table16 (byU16 in lz4.c), larger
 	// ones the first half of table32 (byU32). The one in use is cleared on
 	// each call.
-	table16 [fasterTableSize]uint16
-	table32 [fasterTableSize]uint32
+	table16 [ccompatTableSize]uint16
+	table32 [ccompatTableSize]uint32
 }
 
-var compressorFasterPool = sync.Pool{New: func() interface{} { return new(CompressorFaster) }}
+var compressorCCompatPool = sync.Pool{New: func() interface{} { return new(CompressorCCompat) }}
 
-// CompressBlockFaster is CompressorFaster.CompressBlock with acceleration 1,
-// using a pooled CompressorFaster.
-func CompressBlockFaster(src, dst []byte) (int, error) {
-	c := compressorFasterPool.Get().(*CompressorFaster)
+// CompressBlockCCompat is CompressorCCompat.CompressBlock with acceleration 1,
+// using a pooled CompressorCCompat.
+func CompressBlockCCompat(src, dst []byte) (int, error) {
+	c := compressorCCompatPool.Get().(*CompressorCCompat)
 	n, err := c.CompressBlock(src, dst, 1)
-	compressorFasterPool.Put(c)
+	compressorCCompatPool.Put(c)
 	return n, err
 }
 
-// fasterHasher is LZ4_hashPosition as (v<<shift)*prime>>bits, v being the
+// ccompatHasher is LZ4_hashPosition as (v<<shift)*prime>>bits, v being the
 // 8 bytes at the position: with shift 32, only the low 4 bytes count, which
 // is hash4 for byU16; with shift 24, hash5 for byU32.
-type fasterHasher struct {
+type ccompatHasher struct {
 	shift, bits uint
 	prime       uint64
 }
 
 var (
-	hash4 = fasterHasher{shift: 32, prime: 2654435761, bits: 64 - (fasterHashLog + 1)}
-	hash5 = fasterHasher{shift: 24, prime: 889523592379, bits: 64 - fasterHashLog}
+	hash4 = ccompatHasher{shift: 32, prime: 2654435761, bits: 64 - (ccompatHashLog + 1)}
+	hash5 = ccompatHasher{shift: 24, prime: 889523592379, bits: 64 - ccompatHashLog}
 )
 
 // hash returns a table index. Masking the shift counts spares the checks Go
 // otherwise makes for shifts of 64 or more.
-func (f fasterHasher) hash(v uint64) uint32 {
+func (f ccompatHasher) hash(v uint64) uint32 {
 	return uint32(v << (f.shift & 63) * f.prime >> (f.bits & 63))
 }
 
@@ -92,7 +92,7 @@ func countMatch(r srcReader, src []byte, in, match, limit int) int {
 // CompressBlock compresses src into dst with the given acceleration, as
 // LZ4_compress_fast_extState does. It returns 0 if the result does not fit
 // in dst, which cannot happen if len(dst) >= CompressBlockBound(len(src)).
-func (c *CompressorFaster) CompressBlock(src, dst []byte, acceleration int) (int, error) {
+func (c *CompressorCCompat) CompressBlock(src, dst []byte, acceleration int) (int, error) {
 	if acceleration < 1 {
 		acceleration = 1
 	} else if acceleration > accelerationMax {
@@ -105,42 +105,42 @@ func (c *CompressorFaster) CompressBlock(src, dst []byte, acceleration int) (int
 		dst[0] = 0
 		return 1, nil
 	}
-	if len(src) > fasterMaxInput {
+	if len(src) > ccompatMaxInput {
 		// Beyond what lz4.c accepts, and what 32-bit positions can hold.
 		return CompressBlock(src, dst)
 	}
-	if len(src) < fasterU16Limit {
-		c.table16 = [fasterTableSize]uint16{}
-		return compressFaster(&c.table16, hash4, src, dst, acceleration), nil
+	if len(src) < ccompatU16Limit {
+		c.table16 = [ccompatTableSize]uint16{}
+		return compressCCompat(&c.table16, hash4, src, dst, acceleration), nil
 	}
-	t := c.table32[:1<<fasterHashLog]
+	t := c.table32[:1<<ccompatHashLog]
 	for i := range t {
 		t[i] = 0
 	}
-	return compressFaster(&c.table32, hash5, src, dst, acceleration), nil
+	return compressCCompat(&c.table32, hash5, src, dst, acceleration), nil
 }
 
-func compressFaster[T uint16 | uint32](table *[fasterTableSize]T, hr fasterHasher, src, dst []byte, acceleration int) int {
+func compressCCompat[T uint16 | uint32](table *[ccompatTableSize]T, hr ccompatHasher, src, dst []byte, acceleration int) int {
 	// limitedOutput in lz4.c: check that the output fits as it is written.
 	limited := len(dst) < CompressBlockBound(len(src))
-	// Loads are within the input: the positions searched stop fasterMFLimit
+	// Loads are within the input: the positions searched stop ccompatMFLimit
 	// bytes before its end, and matches before lastLiterals bytes.
 	r := newSrcReader(src)
 
 	var (
 		anchor, ip, di int
-		mfLimitPlusOne = len(src) - fasterMFLimit + 1
+		mfLimitPlusOne = len(src) - ccompatMFLimit + 1
 		matchLimit     = len(src) - lastLiterals
 		forwardH       uint32
 		forwardV       uint64 // the 8 bytes at the next position to search
 		match, token   int
 	)
-	if len(src) < fasterMinLength {
+	if len(src) < ccompatMinLength {
 		goto lastLiteralsLabel
 	}
 
 	// First byte.
-	table[hr.hash(r.load64(src, 0))&(fasterTableSize-1)] = 0
+	table[hr.hash(r.load64(src, 0))&(ccompatTableSize-1)] = 0
 	ip = 1
 	forwardV = r.load64(src, ip)
 	forwardH = hr.hash(forwardV)
@@ -155,7 +155,7 @@ func compressFaster[T uint16 | uint32](table *[fasterTableSize]T, hr fasterHashe
 				h := forwardH
 				cur := forwardIP
 				curV := uint32(forwardV)
-				matchIndex := int(table[h&(fasterTableSize-1)])
+				matchIndex := int(table[h&(ccompatTableSize-1)])
 				ip = forwardIP
 				forwardIP += step
 				step = searchMatchNb >> skipTrigger
@@ -166,7 +166,7 @@ func compressFaster[T uint16 | uint32](table *[fasterTableSize]T, hr fasterHashe
 				match = matchIndex
 				forwardV = r.load64(src, forwardIP)
 				forwardH = hr.hash(forwardV)
-				table[h&(fasterTableSize-1)] = T(cur)
+				table[h&(ccompatTableSize-1)] = T(cur)
 				// Never true for byU16 inputs, which are too short.
 				if matchIndex+distanceMax < cur {
 					continue // too far
@@ -251,12 +251,12 @@ func compressFaster[T uint16 | uint32](table *[fasterTableSize]T, hr fasterHashe
 		}
 
 		// Fill table.
-		table[hr.hash(r.load64(src, ip-2))&(fasterTableSize-1)] = T(ip - 2)
+		table[hr.hash(r.load64(src, ip-2))&(ccompatTableSize-1)] = T(ip - 2)
 
 		// Test next position.
 		{
 			v := r.load64(src, ip)
-			h := hr.hash(v) & (fasterTableSize - 1)
+			h := hr.hash(v) & (ccompatTableSize - 1)
 			matchIndex := int(table[h])
 			table[h] = T(ip)
 			if matchIndex+distanceMax >= ip && r.load32(src, matchIndex) == uint32(v) {

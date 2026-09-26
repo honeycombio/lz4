@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func fasterInputs(t testing.TB) map[string][]byte {
+func ccompatInputs(t testing.TB) map[string][]byte {
 	t.Helper()
 	text, err := os.ReadFile("../../fuzz/corpus/pg1661.txt")
 	if err != nil {
@@ -25,17 +25,17 @@ func fasterInputs(t testing.TB) map[string][]byte {
 	}
 	// Either side of the minimum compressible length and of the switch
 	// between 16- and 32-bit table entries.
-	for _, n := range []int{1, 12, 13, 14, fasterU16Limit - 1, fasterU16Limit, fasterU16Limit + 1} {
+	for _, n := range []int{1, 12, 13, 14, ccompatU16Limit - 1, ccompatU16Limit, ccompatU16Limit + 1} {
 		in[fmt.Sprint("text", n)] = text[:n]
 		in[fmt.Sprint("zeros", n)] = make([]byte, n)
 	}
 	return in
 }
 
-// checkFaster compresses src into a dst of dstLen bytes followed by guard
+// checkCCompat compresses src into a dst of dstLen bytes followed by guard
 // bytes, and checks that nothing is written outside the output and that it
 // decompresses back to src.
-func checkFaster(t testing.TB, c *CompressorFaster, src []byte, dstLen, accel int) {
+func checkCCompat(t testing.TB, c *CompressorCCompat, src []byte, dstLen, accel int) {
 	t.Helper()
 	const guard = 64
 	buf := make([]byte, dstLen+guard)
@@ -71,15 +71,15 @@ func checkFaster(t testing.TB, c *CompressorFaster, src []byte, dstLen, accel in
 	}
 }
 
-func TestCompressorFaster(t *testing.T) {
-	var c CompressorFaster
-	for name, src := range fasterInputs(t) {
+func TestCompressorCCompat(t *testing.T) {
+	var c CompressorCCompat
+	for name, src := range ccompatInputs(t) {
 		t.Run(name, func(t *testing.T) {
 			bound := CompressBlockBound(len(src))
 			for _, accel := range []int{-1, 0, 1, 2, 9, 1 << 20} {
 				for _, d := range []int{bound, bound - 1, len(src), len(src) / 2, 16, 1, 0} {
 					if d >= 0 {
-						checkFaster(t, &c, src, d, accel)
+						checkCCompat(t, &c, src, d, accel)
 					}
 				}
 			}
@@ -87,32 +87,32 @@ func TestCompressorFaster(t *testing.T) {
 	}
 }
 
-// Reusing a CompressorFaster, including across the two table layouts, must
+// Reusing a CompressorCCompat, including across the two table layouts, must
 // not change its output.
-func TestCompressorFasterReuse(t *testing.T) {
-	var reused CompressorFaster
+func TestCompressorCCompatReuse(t *testing.T) {
+	var reused CompressorCCompat
 	rnd := rand.New(rand.NewSource(2))
-	text := fasterInputs(t)["text"]
+	text := ccompatInputs(t)["text"]
 	for i := 0; i < 200; i++ {
-		n := []int{100, 5000, fasterU16Limit - 1, fasterU16Limit, 300000}[rnd.Intn(5)]
+		n := []int{100, 5000, ccompatU16Limit - 1, ccompatU16Limit, 300000}[rnd.Intn(5)]
 		off := rnd.Intn(len(text) - n)
 		src := text[off : off+n]
-		var fresh CompressorFaster
+		var fresh CompressorCCompat
 		want := make([]byte, CompressBlockBound(n))
 		got := make([]byte, CompressBlockBound(n))
 		wn, _ := fresh.CompressBlock(src, want, 1)
 		gn, _ := reused.CompressBlock(src, got, 1)
 		if !bytes.Equal(want[:wn], got[:gn]) {
-			t.Fatalf("call %d, n=%d: output differs from a fresh CompressorFaster", i, n)
+			t.Fatalf("call %d, n=%d: output differs from a fresh CompressorCCompat", i, n)
 		}
 	}
 }
 
 // More acceleration must not compress better on text, and the default must
 // compress text reasonably.
-func TestCompressorFasterAcceleration(t *testing.T) {
-	var c CompressorFaster
-	text := fasterInputs(t)["text"]
+func TestCompressorCCompatAcceleration(t *testing.T) {
+	var c CompressorCCompat
+	text := ccompatInputs(t)["text"]
 	dst := make([]byte, CompressBlockBound(len(text)))
 	prev := 0
 	for _, accel := range []int{1, 2, 4, 8, 16} {
@@ -127,20 +127,20 @@ func TestCompressorFasterAcceleration(t *testing.T) {
 	}
 }
 
-func FuzzCompressorFaster(f *testing.F) {
-	for _, src := range fasterInputs(f) {
+func FuzzCompressorCCompat(f *testing.F) {
+	for _, src := range ccompatInputs(f) {
 		if len(src) > 1<<16 {
 			src = src[:1<<16]
 		}
 		f.Add(src, uint32(CompressBlockBound(len(src))), uint8(1))
 		f.Add(src, uint32(len(src)/2), uint8(3))
 	}
-	var c CompressorFaster
+	var c CompressorCCompat
 	f.Fuzz(func(t *testing.T, src []byte, dstLen uint32, accel uint8) {
 		bound := CompressBlockBound(len(src))
 		if int(dstLen) > bound {
 			dstLen = uint32(bound)
 		}
-		checkFaster(t, &c, src, int(dstLen), int(accel))
+		checkCCompat(t, &c, src, int(dstLen), int(accel))
 	})
 }

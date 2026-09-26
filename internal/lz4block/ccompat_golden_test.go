@@ -12,18 +12,18 @@ import (
 	"github.com/pierrec/lz4/v4/internal/lz4block"
 )
 
-// testdata/faster.golden holds digests of the output of lz4 1.10.0's
-// LZ4_compress_fast for the cases below, showing that CompressorFaster
+// testdata/ccompat.golden holds digests of the output of lz4 1.10.0's
+// LZ4_compress_fast for the cases below, showing that CompressorCCompat
 // produces the same output as the reference implementation. Each digest
 // covers every block's compressed size (0 when it did not fit in dst) and
 // data, so it also shows that the same blocks fit.
-const fasterGoldenPath = "../../testdata/faster.golden"
+const ccompatGoldenPath = "../../testdata/ccompat.golden"
 
-// forFasterGoldenCases calls f for each golden case: every block of each
+// forCCompatGoldenCases calls f for each golden case: every block of each
 // input, split at sizes either side of the switch between 16- and 32-bit
 // table entries (64kiB+11 bytes), into a dst of CompressBlockBound and of
 // the block's own length, with accelerations 1 and 3.
-func forFasterGoldenCases(tb testing.TB, f func(name string, blocks [][]byte, dstLen func(int) int, accel int)) {
+func forCCompatGoldenCases(tb testing.TB, f func(name string, blocks [][]byte, dstLen func(int) int, accel int)) {
 	tb.Helper()
 	inputs := []struct {
 		name string
@@ -69,9 +69,9 @@ func forFasterGoldenCases(tb testing.TB, f func(name string, blocks [][]byte, ds
 	}
 }
 
-// fasterGoldenDigest returns the total compressed size and the digest of the
+// ccompatGoldenDigest returns the total compressed size and the digest of the
 // sizes and data of compressing blocks with compress.
-func fasterGoldenDigest(blocks [][]byte, dstLen func(int) int, compress func(src, dst []byte) int) (int, string) {
+func ccompatGoldenDigest(blocks [][]byte, dstLen func(int) int, compress func(src, dst []byte) int) (int, string) {
 	h := sha256.New()
 	total := 0
 	for _, blk := range blocks {
@@ -84,8 +84,8 @@ func fasterGoldenDigest(blocks [][]byte, dstLen func(int) int, compress func(src
 	return total, fmt.Sprintf("%x", h.Sum(nil))
 }
 
-func TestCompressorFasterGolden(t *testing.T) {
-	f, err := os.Open(fasterGoldenPath)
+func TestCompressorCCompatGolden(t *testing.T) {
+	f, err := os.Open(ccompatGoldenPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,10 +101,10 @@ func TestCompressorFasterGolden(t *testing.T) {
 			want[fs[0]] = fs[1]
 		}
 	}
-	var c lz4block.CompressorFaster
+	var c lz4block.CompressorCCompat
 	n := 0
-	forFasterGoldenCases(t, func(name string, blocks [][]byte, dstLen func(int) int, accel int) {
-		total, digest := fasterGoldenDigest(blocks, dstLen, func(src, dst []byte) int {
+	forCCompatGoldenCases(t, func(name string, blocks [][]byte, dstLen func(int) int, accel int) {
+		total, digest := ccompatGoldenDigest(blocks, dstLen, func(src, dst []byte) int {
 			n, _ := c.CompressBlock(src, dst, accel)
 			return n
 		})
@@ -114,6 +114,6 @@ func TestCompressorFasterGolden(t *testing.T) {
 		n++
 	})
 	if n != len(want) {
-		t.Errorf("checked %d cases, %s has %d", n, fasterGoldenPath, len(want))
+		t.Errorf("checked %d cases, %s has %d", n, ccompatGoldenPath, len(want))
 	}
 }

@@ -93,7 +93,7 @@ type CompressionLevel uint32
 
 const (
 	Fast CompressionLevel = 0
-	// Faster selects CompressorFaster. The HC levels are powers of two from
+	// CCompatFast selects CompressorCCompat. The HC levels are powers of two from
 	// 1<<9, so it cannot be mistaken for one.
-	Faster CompressionLevel = 1
+	CCompatFast CompressionLevel = 1
 )

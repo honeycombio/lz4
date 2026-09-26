@@ -49,11 +49,11 @@ func _() {
 	_ = x[Level7-32768]
 	_ = x[Level8-65536]
 	_ = x[Level9-131072]
-	_ = x[Faster-1]
+	_ = x[CCompatFast-1]
 }
 
 const (
-	_CompressionLevel_name_0 = "FastFaster"
+	_CompressionLevel_name_0 = "FastCCompatFast"
 	_CompressionLevel_name_1 = "Level1"
 	_CompressionLevel_name_2 = "Level2"
 	_CompressionLevel_name_3 = "Level3"
@@ -66,7 +66,7 @@ const (
 )
 
 var (
-	_CompressionLevel_index_0 = [...]uint8{0, 4, 10}
+	_CompressionLevel_index_0 = [...]uint8{0, 4, 15}
 )
 
 func (i CompressionLevel) String() string {
