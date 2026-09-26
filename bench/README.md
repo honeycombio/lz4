@@ -30,6 +30,20 @@ compressed size as a percentage of the input (`%size`). `fast` is
 implementations are not equivalent, so compare their throughput together with
 their `%size`.
 
+## Comparing decompression
+
+`BenchmarkUncompressBlock` decodes the same compressed blocks with both
+implementations, so that neither benefits from decoding output shaped by its
+own compressor. It is named `decoder/source/input/blocksize`: the decoder is
+`go` (`lz4.UncompressBlock`) or `c` (`LZ4_decompress_safe`), and the source is
+the compressor that produced the blocks (`gofast`, `cfast`, `gohc2`, `chc9`).
+
+```sh
+(cd bench && go test -run '^$' -bench '^BenchmarkUncompressBlock$' -cpu 1 -count 8 .) > decode.txt
+```
+
+Compare the `go/…` and `c/…` rows for the same source, input and block size.
+
 ## Checking that output is unchanged
 
 `TestCompressGolden` in the `lz4` package checks the compressed output of

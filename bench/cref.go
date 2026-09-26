@@ -32,3 +32,8 @@ func CompressFast(src, dst []byte, acceleration int) int {
 func CompressHC(src, dst []byte, level int) int {
 	return int(C.LZ4_compress_HC(ptr(src), ptr(dst), C.int(len(src)), C.int(len(dst)), C.int(level)))
 }
+
+// DecompressSafe is LZ4_decompress_safe.
+func DecompressSafe(src, dst []byte) int {
+	return int(C.LZ4_decompress_safe(ptr(src), ptr(dst), C.int(len(src)), C.int(len(dst))))
+}
