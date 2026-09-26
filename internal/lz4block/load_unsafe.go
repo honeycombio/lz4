@@ -13,8 +13,7 @@ import "unsafe"
 // srcReader loads little endian words from a byte slice without bounds
 // checks, on little endian platforms with fast unaligned loads. The noasm,
 // nounsafe and purego tags select the portable version instead. Callers must
-// only load within the slice: CompressorFaster's positions are bounded by
-// the input's end margins, as in lz4.c.
+// only load within the slice, and say why their positions are in bounds.
 type srcReader struct{ p unsafe.Pointer }
 
 // newSrcReader returns a reader for b, which must not be empty.
