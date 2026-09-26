@@ -283,6 +283,8 @@ func (b *FrameDataBlock) Compress(f *Frame, src []byte, level lz4block.Compressi
 	switch level {
 	case lz4block.Fast:
 		n, _ = lz4block.CompressBlock(src, data)
+	case lz4block.Faster:
+		n, _ = lz4block.CompressBlockFaster(src, data)
 	default:
 		n, _ = lz4block.CompressBlockHC(src, data, level)
 	}

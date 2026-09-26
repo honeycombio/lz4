@@ -164,6 +164,10 @@ const (
 	Level9
 )
 
+// Faster compresses with CompressorFaster, the reference implementation's fast
+// algorithm: faster than Fast, with somewhat larger output.
+const Faster CompressionLevel = 1
+
 // CompressionLevelOption defines the compression level (default=Fast).
 func CompressionLevelOption(level CompressionLevel) Option {
 	return func(a applier) error {
@@ -173,7 +177,7 @@ func CompressionLevelOption(level CompressionLevel) Option {
 			return lz4errors.Error(s)
 		case *Writer:
 			switch level {
-			case Fast, Level1, Level2, Level3, Level4, Level5, Level6, Level7, Level8, Level9:
+			case Fast, Faster, Level1, Level2, Level3, Level4, Level5, Level6, Level7, Level8, Level9:
 			default:
 				return fmt.Errorf("%w: %d", lz4errors.ErrOptionInvalidCompressionLevel, level)
 			}
@@ -181,7 +185,7 @@ func CompressionLevelOption(level CompressionLevel) Option {
 			return nil
 		case *CompressingReader:
 			switch level {
-			case Fast, Level1, Level2, Level3, Level4, Level5, Level6, Level7, Level8, Level9:
+			case Fast, Faster, Level1, Level2, Level3, Level4, Level5, Level6, Level7, Level8, Level9:
 			default:
 				return fmt.Errorf("%w: %d", lz4errors.ErrOptionInvalidCompressionLevel, level)
 			}
