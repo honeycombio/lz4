@@ -356,9 +356,12 @@ func FuzzCompressBlockDst(f *testing.F) {
 		}
 		var n int
 		var err error
-		if level%10 == 0 {
+		switch level % 10 {
+		case 0:
 			n, err = CompressBlock(src, buf[:dstLen])
-		} else {
+		case 1:
+			n, err = CompressBlockFaster(src, buf[:dstLen])
+		default:
 			n, err = CompressBlockHC(src, buf[:dstLen], CompressionLevel(1<<(8+level%10)))
 		}
 		for i := int(dstLen); i < len(buf); i++ {
