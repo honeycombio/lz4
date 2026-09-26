@@ -22,13 +22,16 @@ const (
 	fasterMaxInput  = 0x7E000000  // LZ4_MAX_INPUT_SIZE
 	distanceMax     = 65535       // LZ4_DISTANCE_MAX
 	accelerationMax = 65537       // LZ4_ACCELERATION_MAX
+
+	fasterTableSize = 1 << (fasterHashLog + 1)
 )
 
 type CompressorFaster struct {
-	// For inputs below fasterU16Limit, all 1<<(fasterHashLog+1) entries are
-	// used with hash4 (byU16 in lz4.c); otherwise the first 1<<fasterHashLog
-	// with hash5 (byU32). The table is cleared on each call.
-	table [1 << (fasterHashLog + 1)]uint32
+	// Inputs below fasterU16Limit use all of table16 (byU16 in lz4.c), larger
+	// ones the first half of table32 (byU32). The one in use is cleared on
+	// each call.
+	table16 [fasterTableSize]uint16
+	table32 [fasterTableSize]uint32
 }
 
 var compressorFasterPool = sync.Pool{New: func() interface{} { return new(CompressorFaster) }}
@@ -42,33 +45,41 @@ func CompressBlockFaster(src, dst []byte) (int, error) {
 	return n, err
 }
 
-func load32(b []byte, i int) uint32 { return binary.LittleEndian.Uint32(b[i:]) }
-func load64(b []byte, i int) uint64 { return binary.LittleEndian.Uint64(b[i:]) }
-
-// fasterHash is LZ4_hashPosition: hash4 for byU16, hash5 for byU32.
-func fasterHash(src []byte, i int, u16 bool) uint32 {
-	if u16 {
-		return load32(src, i) * 2654435761 >> (32 - (fasterHashLog + 1))
-	}
-	return uint32(load64(src, i) << 24 * 889523592379 >> (64 - fasterHashLog))
+// fasterHasher is LZ4_hashPosition as (v<<shift)*prime>>bits, v being the
+// 8 bytes at the position: with shift 32, only the low 4 bytes count, which
+// is hash4 for byU16; with shift 24, hash5 for byU32.
+type fasterHasher struct {
+	shift, bits uint
+	prime       uint64
 }
 
-// countMatch is LZ4_count: the length of the common prefix of src[in:] and
-// src[match:], stopping at limit.
-func countMatch(src []byte, in, match, limit int) int {
+var (
+	hash4 = fasterHasher{shift: 32, prime: 2654435761, bits: 64 - (fasterHashLog + 1)}
+	hash5 = fasterHasher{shift: 24, prime: 889523592379, bits: 64 - fasterHashLog}
+)
+
+// hash returns a table index. Masking the shift counts spares the checks Go
+// otherwise makes for shifts of 64 or more.
+func (f fasterHasher) hash(v uint64) uint32 {
+	return uint32(v << (f.shift & 63) * f.prime >> (f.bits & 63))
+}
+
+// countMatch is LZ4_count: the length of the common prefix of src[in:limit]
+// and src[match:], with match < in.
+func countMatch(r srcReader, src []byte, in, match, limit int) int {
 	start := in
-	for in < limit-7 {
-		if diff := load64(src, match) ^ load64(src, in); diff != 0 {
+	for in+8 <= limit {
+		if diff := r.load64(src, match) ^ r.load64(src, in); diff != 0 {
 			return in + bits.TrailingZeros64(diff)>>3 - start
 		}
 		in += 8
 		match += 8
 	}
-	if in < limit-3 && load32(src, match) == load32(src, in) {
+	if in+4 <= limit && r.load32(src, match) == r.load32(src, in) {
 		in += 4
 		match += 4
 	}
-	if in < limit-1 && binary.LittleEndian.Uint16(src[match:]) == binary.LittleEndian.Uint16(src[in:]) {
+	if in+2 <= limit && r.load16(src, match) == r.load16(src, in) {
 		in += 2
 		match += 2
 	}
@@ -98,22 +109,30 @@ func (c *CompressorFaster) CompressBlock(src, dst []byte, acceleration int) (int
 		// Beyond what lz4.c accepts, and what 32-bit positions can hold.
 		return CompressBlock(src, dst)
 	}
-	u16 := len(src) < fasterU16Limit
-	table := c.table[:1<<fasterHashLog]
-	if u16 {
-		table = c.table[:]
+	if len(src) < fasterU16Limit {
+		c.table16 = [fasterTableSize]uint16{}
+		return compressFaster(&c.table16, hash4, src, dst, acceleration), nil
 	}
-	for i := range table {
-		table[i] = 0
+	t := c.table32[:1<<fasterHashLog]
+	for i := range t {
+		t[i] = 0
 	}
+	return compressFaster(&c.table32, hash5, src, dst, acceleration), nil
+}
+
+func compressFaster[T uint16 | uint32](table *[fasterTableSize]T, hr fasterHasher, src, dst []byte, acceleration int) int {
 	// limitedOutput in lz4.c: check that the output fits as it is written.
 	limited := len(dst) < CompressBlockBound(len(src))
+	// Loads are within the input: the positions searched stop fasterMFLimit
+	// bytes before its end, and matches before lastLiterals bytes.
+	r := newSrcReader(src)
 
 	var (
 		anchor, ip, di int
 		mfLimitPlusOne = len(src) - fasterMFLimit + 1
 		matchLimit     = len(src) - lastLiterals
 		forwardH       uint32
+		forwardV       uint64 // the 8 bytes at the next position to search
 		match, token   int
 	)
 	if len(src) < fasterMinLength {
@@ -121,9 +140,10 @@ func (c *CompressorFaster) CompressBlock(src, dst []byte, acceleration int) (int
 	}
 
 	// First byte.
-	table[fasterHash(src, 0, u16)] = 0
+	table[hr.hash(r.load64(src, 0))&(fasterTableSize-1)] = 0
 	ip = 1
-	forwardH = fasterHash(src, ip, u16)
+	forwardV = r.load64(src, ip)
+	forwardH = hr.hash(forwardV)
 
 	for {
 		// Find a match.
@@ -134,7 +154,8 @@ func (c *CompressorFaster) CompressBlock(src, dst []byte, acceleration int) (int
 			for {
 				h := forwardH
 				cur := forwardIP
-				matchIndex := int(table[h])
+				curV := uint32(forwardV)
+				matchIndex := int(table[h&(fasterTableSize-1)])
 				ip = forwardIP
 				forwardIP += step
 				step = searchMatchNb >> skipTrigger
@@ -143,12 +164,14 @@ func (c *CompressorFaster) CompressBlock(src, dst []byte, acceleration int) (int
 					goto lastLiteralsLabel
 				}
 				match = matchIndex
-				forwardH = fasterHash(src, forwardIP, u16)
-				table[h] = uint32(cur)
-				if !u16 && matchIndex+distanceMax < cur {
+				forwardV = r.load64(src, forwardIP)
+				forwardH = hr.hash(forwardV)
+				table[h&(fasterTableSize-1)] = T(cur)
+				// Never true for byU16 inputs, which are too short.
+				if matchIndex+distanceMax < cur {
 					continue // too far
 				}
-				if load32(src, match) == load32(src, ip) {
+				if r.load32(src, match) == curV {
 					break
 				}
 			}
@@ -171,7 +194,7 @@ func (c *CompressorFaster) CompressBlock(src, dst []byte, acceleration int) (int
 			token = di
 			di++
 			if limited && di+litLength+(2+1+lastLiterals)+litLength/255 > len(dst) {
-				return 0, nil
+				return 0
 			}
 			if litLength >= 0xF {
 				dst[token] = 0xF0
@@ -188,7 +211,7 @@ func (c *CompressorFaster) CompressBlock(src, dst []byte, acceleration int) (int
 			// LZ4_wildCopy8: may write up to 7 bytes past the literals,
 			// which the rest of the output always overwrites.
 			for i := 0; i < litLength; i += 8 {
-				binary.LittleEndian.PutUint64(dst[di+i:], load64(src, anchor+i))
+				binary.LittleEndian.PutUint64(dst[di+i:], r.load64(src, anchor+i))
 			}
 			di += litLength
 		}
@@ -202,10 +225,10 @@ func (c *CompressorFaster) CompressBlock(src, dst []byte, acceleration int) (int
 
 		// Encode match length.
 		{
-			matchCode := countMatch(src, ip+minMatch, match+minMatch, matchLimit)
+			matchCode := countMatch(r, src, ip+minMatch, match+minMatch, matchLimit)
 			ip += matchCode + minMatch
 			if limited && di+(1+lastLiterals)+(matchCode+240)/255 > len(dst) {
-				return 0, nil
+				return 0
 			}
 			if matchCode >= 0xF {
 				dst[token] += 0xF
@@ -228,14 +251,15 @@ func (c *CompressorFaster) CompressBlock(src, dst []byte, acceleration int) (int
 		}
 
 		// Fill table.
-		table[fasterHash(src, ip-2, u16)] = uint32(ip - 2)
+		table[hr.hash(r.load64(src, ip-2))&(fasterTableSize-1)] = T(ip - 2)
 
 		// Test next position.
 		{
-			h := fasterHash(src, ip, u16)
+			v := r.load64(src, ip)
+			h := hr.hash(v) & (fasterTableSize - 1)
 			matchIndex := int(table[h])
-			table[h] = uint32(ip)
-			if (u16 || matchIndex+distanceMax >= ip) && load32(src, matchIndex) == load32(src, ip) {
+			table[h] = T(ip)
+			if matchIndex+distanceMax >= ip && r.load32(src, matchIndex) == uint32(v) {
 				token = di
 				dst[di] = 0
 				di++
@@ -246,13 +270,14 @@ func (c *CompressorFaster) CompressBlock(src, dst []byte, acceleration int) (int
 
 		// Prepare next loop.
 		ip++
-		forwardH = fasterHash(src, ip, u16)
+		forwardV = r.load64(src, ip)
+		forwardH = hr.hash(forwardV)
 	}
 
 lastLiteralsLabel:
 	lastRun := len(src) - anchor
 	if limited && di+lastRun+1+(lastRun+255-0xF)/255 > len(dst) {
-		return 0, nil
+		return 0
 	}
 	if lastRun >= 0xF {
 		dst[di] = 0xF0
@@ -269,5 +294,5 @@ lastLiteralsLabel:
 		di++
 	}
 	di += copy(dst[di:], src[anchor:])
-	return di, nil
+	return di
 }
