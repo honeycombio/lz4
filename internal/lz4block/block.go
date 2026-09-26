@@ -181,32 +181,37 @@ func (c *Compressor) CompressBlock(src, dst []byte) (int, error) {
 		si, mLen = si+mLen, si+minMatch
 
 		// Find the longest match by looking by batches of 8 bytes.
-		for si+8 <= sn {
-			x := binary.LittleEndian.Uint64(src[si:]) ^ binary.LittleEndian.Uint64(src[si-offset:])
-			if x == 0 {
-				si += 8
-			} else {
-				// Stop is first non-zero byte.
-				si += bits.TrailingZeros64(x) >> 3
-				break
+		// Equal length slices let the compiler drop the bounds checks.
+		if si+8 <= sn {
+			cur := src[si:sn]
+			prev := src[si-offset:][:len(cur)]
+			j := 0
+			for ; j+8 <= len(cur); j += 8 {
+				x := binary.LittleEndian.Uint64(cur[j:]) ^ binary.LittleEndian.Uint64(prev[j:])
+				if x != 0 {
+					// Stop is first non-zero byte.
+					j += bits.TrailingZeros64(x) >> 3
+					break
+				}
 			}
+			si += j
 		}
 
 		mLen = si - mLen
 		if di >= len(dst) {
 			return 0, lz4errors.ErrInvalidSourceShortBuffer
 		}
+		// Token: literal length in the high nibble, match length in the low.
+		tok := byte(0xF)
 		if mLen < 0xF {
-			dst[di] = byte(mLen)
-		} else {
-			dst[di] = 0xF
+			tok = byte(mLen)
 		}
 
 		// Encode literals length.
 		if lLen < 0xF {
-			dst[di] |= byte(lLen << 4)
+			dst[di] = tok | byte(lLen<<4)
 		} else {
-			dst[di] |= 0xF0
+			dst[di] = tok | 0xF0
 			di++
 			l := lLen - 0xF
 			for ; l >= 0xFF && di < len(dst); l -= 0xFF {
