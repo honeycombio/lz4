@@ -10,7 +10,8 @@ import (
 	"github.com/pierrec/lz4/v4"
 )
 
-// Run these with, for example:
+// The fuzzers for frames; those for blocks are in internal/lz4block. See
+// fuzz/README.md. Run these with, for example:
 //
 //	go test -run '^$' -fuzz '^FuzzReader$' -fuzztime 10m .
 //
@@ -54,6 +55,20 @@ func FuzzFrameRoundTrip(f *testing.F) {
 	for i, n := range []int{0, 1, 17, 1000, int(lz4.Block64Kb) + 1} {
 		f.Add(testData(n, true, int64(i)), uint16(i*0x1111), uint16(n/3))
 		f.Add(testData(n, false, int64(i)), uint16(0xFFFF-i), uint16(0))
+	}
+	// Inputs go-fuzz collected for the frame round trip.
+	entries, err := os.ReadDir("fuzz/corpus")
+	if err != nil {
+		f.Fatal(err)
+	}
+	for i, e := range entries {
+		b, err := os.ReadFile(filepath.Join("fuzz/corpus", e.Name()))
+		if err != nil {
+			f.Fatal(err)
+		}
+		if len(b) <= 64<<10 {
+			f.Add(b, uint16(i*0x0101), uint16(len(b)/3))
+		}
 	}
 	blockSizes := []lz4.BlockSize{lz4.Block64Kb, lz4.Block256Kb, lz4.Block1Mb, lz4.Block4Mb}
 	levels := []lz4.CompressionLevel{lz4.Fast, lz4.Level1, lz4.Level5, lz4.Level9}
